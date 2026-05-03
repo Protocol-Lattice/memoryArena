@@ -10,7 +10,7 @@ const numShards = 64
 type arenaShard struct {
 	ptr   atomic.Uint64
 	limit uint64
-	_     [48]byte // pad to 64 bytes to prevent false sharing
+	_     [112]byte // pad to 128 bytes to prevent false sharing on ARM64
 }
 
 type MemoryArena struct {
@@ -43,28 +43,40 @@ func (a *MemoryArena) Alloc(size, alignment uint64) unsafe.Pointer {
 	startIdx := uintptr(hash >> 58) & (numShards - 1)
 	
 	if alignment <= 8 {
-		allocSize := align(size, 8)
+		allocSize := (size + 7) &^ 7
 		
-		// Ultra-fast path: unconditionally Add. If it overflows, the shard is full.
 		shard := &a.shards[startIdx]
-		next := shard.ptr.Add(allocSize)
-		if next <= shard.limit {
-			return unsafe.Pointer(&a.buffer[next-allocSize])
-		}
-
-		// Fallback linearly
-		for i := uintptr(1); i < numShards; i++ {
-			idx := (startIdx + i) & (numShards - 1)
-			shard = &a.shards[idx]
-			next = shard.ptr.Add(allocSize)
+		if shard.ptr.Load() <= shard.limit {
+			next := shard.ptr.Add(allocSize)
 			if next <= shard.limit {
 				return unsafe.Pointer(&a.buffer[next-allocSize])
 			}
 		}
-		panic("arena: out of memory")
+
+		return a.allocFallback(allocSize, startIdx)
 	}
 
-	// Slow path for exotic alignments
+	return a.allocSlow(size, alignment, startIdx)
+}
+
+//go:noinline
+func (a *MemoryArena) allocFallback(allocSize uint64, startIdx uintptr) unsafe.Pointer {
+	for i := uintptr(1); i < numShards; i++ {
+		idx := (startIdx + i) & (numShards - 1)
+		shard := &a.shards[idx]
+		
+		if shard.ptr.Load() <= shard.limit {
+			next := shard.ptr.Add(allocSize)
+			if next <= shard.limit {
+				return unsafe.Pointer(&a.buffer[next-allocSize])
+			}
+		}
+	}
+	panic("arena: out of memory")
+}
+
+//go:noinline
+func (a *MemoryArena) allocSlow(size, alignment uint64, startIdx uintptr) unsafe.Pointer {
 	for i := uintptr(0); i < numShards; i++ {
 		idx := (startIdx + i) & (numShards - 1)
 		shard := &a.shards[idx]
@@ -83,7 +95,6 @@ func (a *MemoryArena) Alloc(size, alignment uint64) unsafe.Pointer {
 			}
 		}
 	}
-
 	panic("arena: out of memory")
 }
 

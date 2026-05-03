@@ -5,17 +5,37 @@ import (
 	"unsafe"
 )
 
-const numShards = 64
+//go:linkname runtime_procPin runtime.procPin
+func runtime_procPin() int
+
+//go:linkname runtime_procUnpin runtime.procUnpin
+func runtime_procUnpin()
+
+const (
+	numShards = 64
+	tlabSize  = 65536 // 64 KB per-P allocation buffer
+	maxProcs  = 1024  // safe upper bound for GOMAXPROCS
+)
 
 type arenaShard struct {
 	ptr   atomic.Uint64
 	limit uint64
-	_     [112]byte // pad to 128 bytes to prevent false sharing on ARM64
+	_     [112]byte // pad to 128 bytes – prevent false sharing on ARM64
+}
+
+// perPSlab is a per-OS-thread (per-P) bump-pointer cache.
+// Because Alloc pins the goroutine to its P before touching these fields,
+// no atomics are needed on the hot path.
+type perPSlab struct {
+	ptr   uint64
+	limit uint64
+	_     [112]byte // same padding
 }
 
 type MemoryArena struct {
 	buffer []byte
 	shards [numShards]arenaShard
+	perP   [maxProcs]perPSlab
 }
 
 func NewMemoryArena(size int) *MemoryArena {
@@ -30,45 +50,89 @@ func NewMemoryArena(size int) *MemoryArena {
 	return a
 }
 
-// align rounds ptr up to alignment
+// align rounds ptr up to alignment (must be a power of two).
 func align(ptr, alignment uint64) uint64 {
 	mask := alignment - 1
-	return (ptr + mask) & ^mask
+	return (ptr + mask) &^ mask
 }
 
 func (a *MemoryArena) Alloc(size, alignment uint64) unsafe.Pointer {
-	addr := uintptr(unsafe.Pointer(&size))
-	// Fibonacci hash to evenly distribute stack addresses
-	hash := uint64(addr) * 0x9E3779B185EBCA87
-	startIdx := uintptr(hash >> 58) & (numShards - 1)
-	
 	if alignment <= 8 {
 		allocSize := (size + 7) &^ 7
-		
-		shard := &a.shards[startIdx]
-		if shard.ptr.Load() <= shard.limit {
-			next := shard.ptr.Add(allocSize)
-			if next <= shard.limit {
-				return unsafe.Pointer(&a.buffer[next-allocSize])
-			}
-		}
 
-		return a.allocFallback(allocSize, startIdx)
+		// ── Per-P TLAB fast path (zero atomics) ─────────────────────────
+		pid := runtime_procPin()
+		slab := &a.perP[pid]
+		ptr := slab.ptr
+		next := ptr + allocSize
+		if next <= slab.limit {
+			slab.ptr = next
+			runtime_procUnpin()
+			return unsafe.Pointer(&a.buffer[ptr])
+		}
+		runtime_procUnpin()
+
+		// TLAB exhausted – claim a fresh chunk from the sharded arena.
+		return a.refillAndAlloc(allocSize)
 	}
 
+	// Slow path for exotic alignments (CAS loop).
+	addr := uintptr(unsafe.Pointer(&size))
+	hash := uint64(addr) * 0x9E3779B185EBCA87
+	startIdx := uintptr(hash>>58) & (numShards - 1)
 	return a.allocSlow(size, alignment, startIdx)
 }
 
+// refillAndAlloc grabs a fresh chunk from the sharded arena,
+// installs it as the calling P's TLAB, and returns the first allocation.
+// It claims at most tlabSize bytes, but never more than what the shard has.
+//
 //go:noinline
-func (a *MemoryArena) allocFallback(allocSize uint64, startIdx uintptr) unsafe.Pointer {
-	for i := uintptr(1); i < numShards; i++ {
+func (a *MemoryArena) refillAndAlloc(allocSize uint64) unsafe.Pointer {
+	// Double-check current P's TLAB after pinning, in case we migrated
+	// since the check in Alloc().
+	pid := runtime_procPin()
+	slab := &a.perP[pid]
+	if slab.ptr+allocSize <= slab.limit {
+		ptr := slab.ptr
+		slab.ptr += allocSize
+		runtime_procUnpin()
+		return unsafe.Pointer(&a.buffer[ptr])
+	}
+	runtime_procUnpin()
+
+	// Use local stack address for shard diversity across goroutines.
+	var dummy uint64
+	addr := uintptr(unsafe.Pointer(&dummy))
+	hash := uint64(addr) * 0x9E3779B185EBCA87
+	startIdx := uintptr(hash>>58) & (numShards - 1)
+
+
+	for i := uintptr(0); i < numShards; i++ {
 		idx := (startIdx + i) & (numShards - 1)
-		shard := &a.shards[idx]
-		
-		if shard.ptr.Load() <= shard.limit {
-			next := shard.ptr.Add(allocSize)
-			if next <= shard.limit {
-				return unsafe.Pointer(&a.buffer[next-allocSize])
+		sh := &a.shards[idx]
+
+		for {
+			cur := sh.ptr.Load()
+			if cur >= sh.limit {
+				break // shard is full
+			}
+			remaining := sh.limit - cur
+			if remaining < allocSize {
+				break // not enough even for this one alloc
+			}
+			// Claim up to tlabSize but never more than what remains.
+			take := uint64(tlabSize)
+			if take > remaining {
+				take = remaining
+			}
+			if sh.ptr.CompareAndSwap(cur, cur+take) {
+				// Install the claimed chunk as this P's TLAB.
+				pid := runtime_procPin()
+				a.perP[pid].ptr = cur + allocSize
+				a.perP[pid].limit = cur + take
+				runtime_procUnpin()
+				return unsafe.Pointer(&a.buffer[cur])
 			}
 		}
 	}
@@ -87,9 +151,8 @@ func (a *MemoryArena) allocSlow(size, alignment uint64, startIdx uintptr) unsafe
 			next := align(aligned+size, 8)
 
 			if next > shard.limit {
-				break // Not enough space in this shard, try the next one
+				break
 			}
-
 			if shard.ptr.CompareAndSwap(current, next) {
 				return unsafe.Pointer(&a.buffer[aligned])
 			}
@@ -103,18 +166,37 @@ func (a *MemoryArena) Reset() {
 	for i := 0; i < numShards; i++ {
 		a.shards[i].ptr.Store(uint64(i) * shardSize)
 	}
+	// Invalidate all per-P TLABs so they refill from the reset shards.
+	for i := range a.perP {
+		a.perP[i].ptr = 0
+		a.perP[i].limit = 0
+	}
 }
 
 func (a *MemoryArena) AllocatedBytes() uint64 {
+	// Shards advance their ptr by the full TLAB chunk on every refill,
+	// so committed = bytes actually handed to callers + bytes still sitting
+	// unused in per-P TLABs. Subtract the unused TLAB tails to get the
+	// true "bytes allocated by callers" figure.
 	var total uint64
 	shardSize := uint64(len(a.buffer)) / numShards
 	for i := range a.shards {
-		used := a.shards[i].ptr.Load() - (uint64(i) * shardSize)
-		// Since we use unconditional Add, ptr can overflow shardSize when full.
+		committed := a.shards[i].ptr.Load()
+		base := uint64(i) * shardSize
+		if committed <= base {
+			continue
+		}
+		used := committed - base
 		if used > shardSize {
 			used = shardSize
 		}
 		total += used
+	}
+	// Subtract unused bytes still held in per-P TLABs.
+	for i := range a.perP {
+		if a.perP[i].limit > a.perP[i].ptr {
+			total -= a.perP[i].limit - a.perP[i].ptr
+		}
 	}
 	return total
 }

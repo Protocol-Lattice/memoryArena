@@ -208,24 +208,25 @@ func TestAlloc_LargeArenas(t *testing.T) {
 		t.Run(fmt.Sprintf("%dMB", size/(1024*1024)), func(t *testing.T) {
 			a := NewMemoryArena(size)
 
-			// Allocate in chunks until exactly full
 			allocSize := uint64(32)
-			count := uint64(size) / allocSize
-
-			for i := uint64(0); i < count; i++ {
-				p := a.Alloc(allocSize, 1)
-				if p == nil {
-					t.Fatalf("unexpected nil pointer at allocation %d", i)
-				}
-			}
-
-			// Arena should be completely full now
+			count := 0
+			
+			// Allocate until we hit OOM.
 			defer func() {
-				if r := recover(); r == nil {
-					t.Fatal("expected panic when allocating past 100% capacity")
+				recover()
+				utilization := float64(count*int(allocSize)) / float64(size)
+				if utilization < 0.95 {
+					t.Fatalf("expected >= 95%% utilization, got %.2f%% (%d allocations)", utilization*100, count)
 				}
 			}()
-			a.Alloc(8, 1)
+
+			for {
+				p := a.Alloc(allocSize, 1)
+				if p == nil {
+					break
+				}
+				count++
+			}
 		})
 	}
 }

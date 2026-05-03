@@ -48,15 +48,16 @@ The arena is optimized to rival the speed of raw stack allocations. In highly-co
 ```text
 goos: darwin
 goarch: arm64
+pkg: github.com/Protocol-Lattice/memoryArena
 cpu: Apple M2
-BenchmarkMake_Single-8            	1000000000	         0.5822 ns/op
-BenchmarkMake_Slice-8             	1000000000	         0.2950 ns/op
-BenchmarkArena_New_Single-8       	236660113	         5.218 ns/op
-BenchmarkArena_Slice_Single-8     	60157410	        19.96 ns/op
-BenchmarkArena_New_Parallel-8     	838137710	         2.293 ns/op
-BenchmarkArena_Slice_Parallel-8   	400284090	         3.549 ns/op
-BenchmarkArena_WithReset-8        	203530586	         5.541 ns/op
-BenchmarkArena_Contention-8       	83820100	        16.09 ns/op
+BenchmarkMake_Single-8                  1000000000               0.2902 ns/op
+BenchmarkMake_Slice-8                   1000000000               0.2913 ns/op
+BenchmarkArena_New_Single-8             252217918                4.646 ns/op
+BenchmarkArena_Slice_Single-8           263953323                4.642 ns/op
+BenchmarkArena_New_Parallel-8           1000000000               0.8971 ns/op
+BenchmarkArena_Slice_Parallel-8         1000000000               0.8586 ns/op
+BenchmarkArena_WithReset-8              261591999                4.520 ns/op
+BenchmarkArena_Contention-8             1000000000               0.9097 ns/op
 ```
 
 *Note: The native `Make` benchmarks measure standard Go allocations which the Go compiler escapes to the thread-local stack/mcache, effectively making them 0-cost. Real-world heap allocations under GC pressure take significantly longer, where `memoryArena` shines.*

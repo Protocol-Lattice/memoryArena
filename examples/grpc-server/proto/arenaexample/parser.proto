@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package arenaexample.v1;
+
+option go_package = "github.com/Protocol-Lattice/memoryArena/examples/grpc-server/proto/arenaexample;arenaexamplepb";
+
+service ParserService {
+  rpc Parse(ParseRequest) returns (ParseResponse);
+  rpc Sum(SumRequest) returns (SumResponse);
+}
+
+message Field {
+  string key = 1;
+  string value = 2;
+}
+
+message ParseRequest {
+  repeated Field fields = 1;
+}
+
+message ParseResponse {
+  repeated Field fields = 1;
+  uint32 used = 2;
+  uint32 remaining = 3;
+}
+
+message SumRequest {
+  repeated int64 numbers = 1;
+}
+
+message SumResponse {
+  int64 sum = 1;
+  repeated Field parsed_numbers = 2;
+  uint32 used = 3;
+  uint32 remaining = 4;
+}

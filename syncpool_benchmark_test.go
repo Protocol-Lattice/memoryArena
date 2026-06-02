@@ -33,6 +33,14 @@ func BenchmarkArenaVsSyncPoolLargeRepeatedAllocations(b *testing.B) {
 				benchmarkArenaSlabReuseBytes(b, bm.size)
 			})
 
+			b.Run("ConcurrentArenaSlabReuse", func(b *testing.B) {
+				benchmarkConcurrentArenaSlabReuseBytes(b, bm.size)
+			})
+
+			b.Run("PooledArenaExecuteReuse", func(b *testing.B) {
+				benchmarkPooledArenaExecuteReuseBytes(b, bm.size)
+			})
+
 			b.Run("SyncPoolSliceReuse", func(b *testing.B) {
 				benchmarkSyncPoolSliceReuseBytes(b, int(bm.size))
 			})
@@ -71,6 +79,47 @@ func BenchmarkArenaVsSyncPoolRepeatedLargeBatches(b *testing.B) {
 					}
 					sum += slab[len(slab)-1]
 					arena.Reset()
+				}
+
+				syncPoolBenchmarkSink = byte(sum)
+			})
+
+			b.Run("ConcurrentArenaBatchReuse", func(b *testing.B) {
+				arena := NewConcurrentMemoryArena[int](uint(bm.items))
+
+				b.ReportAllocs()
+				b.SetBytes(int64(bm.items * 8))
+				b.ResetTimer()
+
+				var sum int
+				for i := 0; i < b.N; i++ {
+					slab := arena.AllocSlab(uint(bm.items))
+					for j := range slab {
+						slab[j] = j
+					}
+					sum += slab[len(slab)-1]
+					arena.Reset()
+				}
+
+				syncPoolBenchmarkSink = byte(sum)
+			})
+
+			b.Run("PooledArenaBatchReuse", func(b *testing.B) {
+				pool := NewPooledMemoryArena[int](uint(bm.items))
+
+				b.ReportAllocs()
+				b.SetBytes(int64(bm.items * 8))
+				b.ResetTimer()
+
+				var sum int
+				for i := 0; i < b.N; i++ {
+					pool.Execute(func(arena *MemoryArena[int]) {
+						slab := arena.AllocSlab(uint(bm.items))
+						for j := range slab {
+							slab[j] = j
+						}
+						sum += slab[len(slab)-1]
+					})
 				}
 
 				syncPoolBenchmarkSink = byte(sum)
@@ -132,6 +181,43 @@ func benchmarkArenaSlabReuseBytes(b *testing.B, size uint) {
 		touchBytes(buf)
 		sum ^= buf[len(buf)-1]
 		arena.Reset()
+	}
+
+	syncPoolBenchmarkSink = sum
+}
+
+func benchmarkConcurrentArenaSlabReuseBytes(b *testing.B, size uint) {
+	arena := NewConcurrentMemoryArena[byte](size)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+
+	var sum byte
+	for i := 0; i < b.N; i++ {
+		buf := arena.AllocSlab(size)
+		touchBytes(buf)
+		sum ^= buf[len(buf)-1]
+		arena.Reset()
+	}
+
+	syncPoolBenchmarkSink = sum
+}
+
+func benchmarkPooledArenaExecuteReuseBytes(b *testing.B, size uint) {
+	pool := NewPooledMemoryArena[byte](size)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+
+	var sum byte
+	for i := 0; i < b.N; i++ {
+		pool.Execute(func(arena *MemoryArena[byte]) {
+			buf := arena.AllocSlab(size)
+			touchBytes(buf)
+			sum ^= buf[len(buf)-1]
+		})
 	}
 
 	syncPoolBenchmarkSink = sum

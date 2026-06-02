@@ -1,4 +1,4 @@
-# memoryArena
+<img width="1024" height="1024" alt="ChatGPT Image 2 cze 2026 o 14_11_49" src="https://github.com/user-attachments/assets/d756a6bf-23fe-4a6d-9c1d-3887080a175f" />
 
 A small, typed memory arena for Go.
 

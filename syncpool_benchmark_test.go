@@ -16,6 +16,11 @@ func BenchmarkArenaVsSyncPoolLargeRepeatedAllocations(b *testing.B) {
 		{name: "4KiB", size: 4 << 10},
 		{name: "64KiB", size: 64 << 10},
 		{name: "1MiB", size: 1 << 20},
+		{name: "4MiB", size: 4 << 20},
+		{name: "16MiB", size: 16 << 20},
+		{name: "64MiB", size: 64 << 20},
+		{name: "100MiB", size: 100 << 20},
+		{name: "1GiB", size: 1 << 30},
 	}
 
 	for _, bm := range benchmarks {
@@ -39,9 +44,12 @@ func BenchmarkArenaVsSyncPoolRepeatedLargeBatches(b *testing.B) {
 	benchmarks := []struct {
 		items int
 	}{
-		{items: 1_024},
-		{items: 16_384},
-		{items: 65_536},
+		{items: 1_024},       // 8 KiB on 64-bit platforms.
+		{items: 16_384},      // 128 KiB on 64-bit platforms.
+		{items: 65_536},      // 512 KiB on 64-bit platforms.
+		{items: 1_048_576},   // 8 MiB on 64-bit platforms.
+		{items: 13_107_200},  // 100 MiB on 64-bit platforms.
+		{items: 134_217_728}, // 1 GiB on 64-bit platforms.
 	}
 
 	for _, bm := range benchmarks {
